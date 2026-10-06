@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>OutfitStudio.Worker</AssemblyName>
+    <!-- Keep the redistributable runtime and its checked-in notices in sync. -->
+    <RuntimeFrameworkVersion>10.0.12</RuntimeFrameworkVersion>
+    <!-- The worker exchanges invariant JSON/binary data and must also run in Wine,
+         which may not provide the Windows ICU globalization data. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../OutfitStudio.Core/OutfitStudio.Core.csproj" />
+  </ItemGroup>
+</Project>

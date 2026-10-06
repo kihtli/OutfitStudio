@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>14.0</LangVersion>
+    <Deterministic>true</Deterministic>
+    <NuGetAudit>false</NuGetAudit>
+    <Authors>kihtli</Authors>
+    <RepositoryUrl>https://github.com/kihtli/OutfitStudio</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PathMap>$(MSBuildThisFileDirectory)=/_/OutfitStudio/</PathMap>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+</Project>

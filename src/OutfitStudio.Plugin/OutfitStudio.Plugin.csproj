@@ -1,0 +1,14 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <AssemblyName>OutfitStudio</AssemblyName>
+    <RootNamespace>OutfitStudio.Plugin</RootNamespace>
+    <Version>0.1.9</Version>
+    <Authors>kihtli</Authors>
+    <Description>Convert Penumbra outfits between compatible body meshes.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The process boundary needs only the shared wire contract, not the model parser. -->
+    <Compile Include="../OutfitStudio.Core/Protocol/WorkerProtocol.cs" Link="Protocol/WorkerProtocol.cs" />
+    <Compile Include="../Shared/ModPath.cs" Link="Paths/ModPath.cs" />
+  </ItemGroup>
+</Project>
