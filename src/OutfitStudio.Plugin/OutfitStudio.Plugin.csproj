@@ -2,7 +2,7 @@
   <PropertyGroup>
     <AssemblyName>OutfitStudio</AssemblyName>
     <RootNamespace>OutfitStudio.Plugin</RootNamespace>
-    <Version>0.1.9</Version>
+    <Version>0.1.10</Version>
     <Authors>kihtli</Authors>
     <Description>Convert Penumbra outfits between compatible body meshes.</Description>
   </PropertyGroup>

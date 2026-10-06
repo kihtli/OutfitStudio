@@ -79,8 +79,8 @@ public sealed partial class PenumbraMod
             using (var validation = Open(stage, limits, cancellationToken))
             {
                 var actual = validation.GetModelFiles().Select(model => model.RelativePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                if (!actual.SetEquals(reviewed.Models.Select(model => model.OutputRelativePath)))
-                    throw new InvalidDataException("The finished mod does not reference exactly the generated models.");
+                if (!actual.SetEquals(reviewed.Models.Select(model => model.OutputRelativePath).Concat(reviewed.PreservedModelPaths)))
+                    throw new InvalidDataException("The finished mod does not reference exactly the generated and explicitly preserved models.");
             }
             SafeModFiles.NoLinks(stage, outputParent);
             Directory.Move(stage, destination);
@@ -95,15 +95,26 @@ public sealed partial class PenumbraMod
     }
 
     private sealed record ReviewedRegeneration(JsonObject Default, List<JsonObject> Groups,
-        List<ModGeneratedModel> Models, HashSet<int> ReplacedIndices);
+        List<ModGeneratedModel> Models, HashSet<string> PreservedModelPaths, HashSet<int> ReplacedIndices);
 
     private ReviewedRegeneration ReviewRegeneration(ModRegenerationPlan plan)
     {
-        if (plan.Models is null || plan.GroupReplacements is null || plan.Models.Count == 0)
+        if (plan.Models is null || plan.GroupReplacements is null || plan.PreservedModelPaths is null || plan.Models.Count == 0)
             throw new InvalidDataException("Regeneration requires metadata changes and at least one generated model.");
-        if (plan.Models.Count > limits.MaxFiles)
+        if ((long)plan.Models.Count + plan.PreservedModelPaths.Count > limits.MaxFiles)
             throw new InvalidDataException("The regeneration plan exceeds the file limit.");
         var originals = GetModelFiles().ToDictionary(model => model.RelativePath, StringComparer.OrdinalIgnoreCase);
+        var preserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in plan.PreservedModelPaths)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                throw new InvalidDataException("Preserved model paths must be nonempty.");
+            var relative = SafeModFiles.Relative(path);
+            if (!originals.TryGetValue(relative, out var original))
+                throw new InvalidDataException($"Preserved model is not a referenced original outfit model: {relative}");
+            if (!preserved.Add(original.RelativePath))
+                throw new InvalidDataException($"Duplicate preserved model: {relative}");
+        }
         var models = new List<ModGeneratedModel>();
         var ids = new HashSet<string>(StringComparer.Ordinal);
         var generated = new Dictionary<string, ModGeneratedModel>(StringComparer.OrdinalIgnoreCase);
@@ -167,22 +178,34 @@ public sealed partial class PenumbraMod
             throw new InvalidDataException("Regeneration must preserve the default non-model files, file swaps and metadata.");
 
         var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var usedPreserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var container in new[] { newDefault }.Concat(groups).SelectMany(WalkContainers))
         {
             foreach (var (gamePath, relative) in StringMap(container, "Files"))
             {
                 if (gamePath.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (!generated.TryGetValue(relative, out var job))
+                    if (preserved.Contains(relative))
+                    {
+                        if (!originals[relative].GamePaths.Contains(gamePath, StringComparer.OrdinalIgnoreCase))
+                            throw new InvalidDataException($"Preserved model maps to a different game path than its original: {gamePath}");
+                        usedPreserved.Add(relative);
+                    }
+                    else if (generated.TryGetValue(relative, out var job))
+                    {
+                        if (!originals[job.SourceRelativePath].GamePaths.Contains(gamePath, StringComparer.OrdinalIgnoreCase))
+                            throw new InvalidDataException($"Generated model maps to a different game path than its source: {gamePath}");
+                        used.Add(relative);
+                    }
+                    else
                         throw new InvalidDataException($"Output still references an ungenerated model: {relative}");
-                    if (!originals[job.SourceRelativePath].GamePaths.Contains(gamePath, StringComparer.OrdinalIgnoreCase))
-                        throw new InvalidDataException($"Generated model maps to a different game path than its source: {gamePath}");
-                    used.Add(relative);
                 }
                 else
                 {
                     if (generated.ContainsKey(relative))
                         throw new InvalidDataException($"A generated model is referenced as a non-model file: {gamePath}");
+                    if (preserved.Contains(relative))
+                        throw new InvalidDataException($"A preserved model is referenced as a non-model file: {gamePath}");
                     _ = ResolveFile(relative);
                 }
             }
@@ -192,9 +215,11 @@ public sealed partial class PenumbraMod
         }
         if (!used.SetEquals(generated.Keys))
             throw new InvalidDataException("Every generated model must be referenced by an output option or the default data.");
+        if (!usedPreserved.SetEquals(preserved))
+            throw new InvalidDataException("Every explicitly preserved model must remain referenced by an output option or the default data.");
         ValidateGeneratedReferences(groupData, groups);
         ValidateGeneratedSelections(generatedGroups, generated.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase), groups);
-        return new(newDefault, groups, models, replaced);
+        return new(newDefault, groups, models, preserved, replaced);
     }
 
     // Conditional size data is deliberately a small, verifiable subset of Penumbra's

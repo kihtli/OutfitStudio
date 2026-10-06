@@ -2,7 +2,7 @@
 
 An experimental Dalamud plugin by **kihtli** that refits Penumbra outfits from one body to another. Select the source body, an outfit, and one or more destination body mods; the result is a separate mod with destination size options.
 
-**Initial testing prerelease: v0.1.9.** This is approximate geometry fitting. Check clipping, seams, shape toggles and movement in game before relying on a conversion.
+**Testing prerelease: v0.1.10.** This is approximate geometry fitting. Check clipping, seams, shape toggles and movement in game before relying on a conversion.
 
 ## Install the testing release
 
@@ -18,7 +18,7 @@ An experimental Dalamud plugin by **kihtli** that refits Penumbra outfits from o
 
 Outfit Studio is **testing-only** in this repository. The complete Windows conversion worker is included; Blender and a separate .NET runtime installation are not needed. Source body mods, destination body mods and outfits are not included.
 
-The [GitHub prerelease](https://github.com/kihtli/OutfitStudio/releases/tag/v0.1.9) also provides a portable ZIP. For manual development-plugin installation, extract the entire archive and add `OutfitStudio.dll` as a dev plugin location. Keep the complete `worker/` folder beside it. Avoid enabling both a manual and repository installation at the same time.
+The [GitHub prerelease](https://github.com/kihtli/OutfitStudio/releases/tag/v0.1.10) also provides a portable ZIP. For manual development-plugin installation, extract the entire archive and add `OutfitStudio.dll` as a dev plugin location. Keep the complete `worker/` folder beside it. Avoid enabling both a manual and repository installation at the same time.
 
 ## Convert an outfit
 
@@ -30,6 +30,8 @@ The [GitHub prerelease](https://github.com/kihtli/OutfitStudio/releases/tag/v0.1
 The original mods are read-only inputs. Supported material and style options are retained. Chest and leg selections coordinate the fitting of clothes that span both regions, such as a dress. Generating all combinations can take time and disk space; analysis reports the model count before creation.
 
 For **Néolithe Neobelly**, select both **MAIN - Neobelly** and **EXTRA - Neobelly**. These components supply one combined set of destination choices. Selecting fitting references does not enable those body mods or add their underwear, body textures, genital meshes or physics to the outfit.
+
+**Accessories with several body fits:** choose a source body actually included in the accessory's labels. The converter uses that body's fits and retains explicit style choices, such as **Clamps** and **Clamps + Chain**, for each destination size. It identifies the fitted body region from the geometry, so an item in a ring slot can fit the chest. Connected accessory parts retain their rigid shape; flexible accessories may need advanced manual fitting. Fixed support models for other races remain unchanged. Ambiguous accessories spanning several body regions still require advanced references.
 
 Symlinked Penumbra roots and Windows junctions are supported, including Wine drive mappings. Individual linked files inside a mod are rejected. The optional **Advanced conversion settings** provide manual body references and selected-options conversion when automatic size matching is unsuitable.
 

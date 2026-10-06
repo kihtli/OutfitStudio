@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using OutfitStudio.Core.Geometry;
+using OutfitStudio.Core.Models;
 using OutfitStudio.Core.Mods;
 using OutfitStudio.Core.Protocol;
 
@@ -20,17 +22,25 @@ public static class AutoConversionPlanner
         public int TargetModIndex { get; init; }
     }
     private sealed record BodyGroup(int Index, string Name, RegionKey Key, IReadOnlyList<BodyOption> Options, BodyOption Default, int Preference, bool HasModelDefault);
-    private sealed record OutfitModel(ModModelFile Model, RegionKey Key);
-    private sealed record MatchedOption(int Index, string Name, IReadOnlyList<(OutfitModel Outfit, BodyOption Body)> Models);
+    private sealed record OutfitModel(ModModelFile Model, RegionKey Key)
+    {
+        public bool IsAccessory { get; init; }
+    }
+    private sealed record MatchedOption(int Index, string Name, IReadOnlyList<(OutfitModel Outfit, BodyOption Body)> Models)
+    {
+        public string Style { get; init; } = "";
+    }
     private sealed record Draft(AutomaticGroupPlan Plan, RegionKey Key, MatchedOption Template);
     private sealed record SupplementalChoice(BodyReferencePair? Reference, AutomaticOptionSelection? Selection);
 
     public static AutomaticConversionPlan Plan(PenumbraMod source, PenumbraMod target, PenumbraMod outfit,
-        IReadOnlyDictionary<int, int>? preferredTemplateIndices = null)
-        => Plan(source, new[] { target }, outfit, preferredTemplateIndices);
+        IReadOnlyDictionary<int, int>? preferredTemplateIndices = null,
+        IReadOnlyDictionary<string, string>? accessoryRegions = null)
+        => Plan(source, new[] { target }, outfit, preferredTemplateIndices, accessoryRegions);
 
     public static AutomaticConversionPlan Plan(PenumbraMod source, IReadOnlyList<PenumbraMod> targetMods, PenumbraMod outfit,
-        IReadOnlyDictionary<int, int>? preferredTemplateIndices = null)
+        IReadOnlyDictionary<int, int>? preferredTemplateIndices = null,
+        IReadOnlyDictionary<string, string>? accessoryRegions = null)
     {
         ArgumentNullException.ThrowIfNull(source); ArgumentNullException.ThrowIfNull(targetMods); ArgumentNullException.ThrowIfNull(outfit);
         if (targetMods.Count == 0 || targetMods.Any(m => m is null)) throw new ArgumentException("Choose at least one destination body mod.", nameof(targetMods));
@@ -54,11 +64,23 @@ public static class AutoConversionPlanner
         if (preferredTemplateIndices is not null && preferredTemplateIndices.Keys.Any(i => i < 0 || i >= groups.Count))
             issues.Add("A preferred source template names an outfit group that does not exist.");
         var drafts = new List<Draft>();
+        var preservedModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         bool sourceYab = IsYab(source.Name);
         for (int groupIndex = 0; groupIndex < groups.Count; groupIndex++)
         {
             var group = groups[groupIndex]; string name = Text(group, "Name");
             if (!HasModels(group)) continue;
+            var fixedOptions = Objects(group, "Options");
+            var fixedMappings = fixedOptions.SelectMany(ModelGamePaths).ToArray();
+            if (Text(group, "Type") == "Single" && fixedOptions.Count == 1 && !ModelGamePaths(group).Any()
+                && fixedMappings.Length > 0 && fixedMappings.All(p => TryAccessoryRace(p.Key, out var race)
+                    && !sources.Keys.Any(k => k.Race == race))
+                && !HasModelSwapsOrNestedMappings(fixedOptions[0]))
+            {
+                foreach (var mapping in fixedMappings) preservedModels.Add(PathKey(mapping.Value));
+                warnings.Add($"Fixed accessory support group '{name}' is retained unchanged for races outside the selected source body.");
+                continue;
+            }
             if (Text(group, "Type") != "Single")
             {
                 issues.Add($"Outfit group '{name}' contains models in a {Text(group, "Type")} group. Automatic sizing requires a single-choice size group.");
@@ -72,19 +94,26 @@ public static class AutoConversionPlanner
             var options = Objects(group, "Options");
             var matches = new List<MatchedOption>();
             var groupIssues = new List<string>();
-            JsonObject? referencePayload = null;
-            RegionKey? groupKey = null; string[]? gamePaths = null;
+            var referencePayloads = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+            bool accessoryGroup = options.SelectMany(ModelGamePaths).Any(p => TryAccessoryRace(p.Key, out _));
+            int otherFamilies = 0;
+            RegionKey? groupKey = null;
+            var gamePathsByStyle = new Dictionary<string, string[]>(StringComparer.Ordinal);
             for (int optionIndex = 0; optionIndex < options.Count; optionIndex++)
             {
                 var option = options[optionIndex]; string optionName = Text(option, "Name");
                 if (!HasModels(option)) continue;
+                var label = accessoryGroup ? BodyFitLabels.ParseOutfitLabel(optionName, source.Name) : null;
+                if (label is { MatchesSource: false }) { otherFamilies++; continue; }
+                string sourceSize = label?.SourceSize ?? optionName;
+                string style = label?.Style ?? "";
                 if (option["Manipulations"] is not null and not JsonArray)
                     groupIssues.Add($"Outfit option '{name}' / '{optionName}' has an unsupported metadata manipulation encoding.");
                 var payload = NonModelPayload(option, sourceYab);
-                if (referencePayload is not null && !JsonNode.DeepEquals(referencePayload, payload))
+                if (referencePayloads.TryGetValue(style, out var referencePayload) && !JsonNode.DeepEquals(referencePayload, payload))
                     groupIssues.Add($"Outfit group '{name}' changes textures, file swaps or non-size metadata between its model options. Automatic sizing cannot discard those style differences; separate them into their own option group first.");
-                referencePayload ??= payload;
-                var direct = DirectModels(option, inventory, $"'{name}' / '{optionName}'", groupIssues);
+                referencePayloads.TryAdd(style, payload);
+                var direct = DirectModels(option, inventory, $"'{name}' / '{optionName}'", groupIssues, accessoryRegions);
                 if (direct.Count == 0) continue;
                 var keys = direct.Select(m => m.Key).Distinct().ToArray();
                 if (keys.Length != 1)
@@ -99,31 +128,35 @@ public static class AutoConversionPlanner
                 }
                 groupKey = keys[0];
                 var paths = ModelGamePaths(option).Select(p => p.Key.ToLowerInvariant()).Order(StringComparer.Ordinal).ToArray();
-                if (gamePaths is not null && !gamePaths.SequenceEqual(paths))
+                if (gamePathsByStyle.TryGetValue(style, out var gamePaths) && !gamePaths.SequenceEqual(paths))
                     groupIssues.Add($"Outfit group '{name}' changes which equipment files are present between sizes. Automatic sizing cannot discard those differences.");
-                gamePaths ??= paths;
+                gamePathsByStyle.TryAdd(style, paths);
                 if (!sources.TryGetValue(keys[0], out var sourceGroup))
                 {
                     groupIssues.Add($"The source body has no {RegionName(keys[0].Slot)} reference for race {keys[0].Race}, required by '{name}'.");
                     continue;
                 }
-                var selected = MatchSource(optionName, sourceGroup, sourceYab);
+                var selected = MatchSource(sourceSize, sourceGroup, sourceYab);
                 if (selected.Length != 1)
                 {
                     string reason = selected.Length == 0 ? "does not match a source body size" : $"matches several source body references ({string.Join(", ", selected.Select(x => x.Name))})";
                     groupIssues.Add($"Outfit option '{name}' / '{optionName}' {reason}. Rename it to an unambiguous source size or use advanced mapping.");
                     continue;
                 }
-                matches.Add(new(optionIndex, optionName, direct.Select(m => (m, selected[0])).ToArray()));
-                var requested = ParseFeatures(optionName, sourceYab);
+                matches.Add(new(optionIndex, optionName, direct.Select(m => (m, selected[0])).ToArray()) { Style = style });
+                var requested = ParseFeatures(sourceSize, sourceYab);
                 if ((requested.Genital is null && selected[0].Features.Genital is not null)
                     || (requested.Coverage is null && selected[0].Features.Coverage is not null))
                     warnings.Add($"Source outfit size '{optionName}' uses body reference '{selected[0].Name}'; unspecified anatomy or coverage follows the source package's enabled default.");
             }
+            if (otherFamilies > 0)
+                warnings.Add($"'{name}' omits {otherFamilies} fits labelled for other source body families; only '{source.Name}' fits are used.");
             if (groupIssues.Count > 0) { issues.AddRange(groupIssues); continue; }
             if (matches.Count == 0 || groupKey is null)
             {
-                issues.Add($"Outfit group '{name}' contains model data that cannot be read as direct size options.");
+                issues.Add(otherFamilies > 0
+                    ? $"Outfit group '{name}' has no matching fit for source body '{source.Name}'. Choose one of the body families included in the outfit."
+                    : $"Outfit group '{name}' contains model data that cannot be read as direct size options.");
                 continue;
             }
             if (!targets.TryGetValue(groupKey, out var targetGroup))
@@ -133,7 +166,7 @@ public static class AutoConversionPlanner
             }
             int defaultIndex = DefaultIndex(group);
             var canonicalTemplate = matches.FirstOrDefault(m => m.Index == defaultIndex)
-                ?? matches.OrderBy(m => TemplateRank(m.Name, sourceYab)).ThenBy(m => m.Index).First();
+                ?? matches.OrderBy(m => TemplateRank(m.Models[0].Body.Name, sourceYab)).ThenBy(m => m.Index).First();
             var template = canonicalTemplate;
             if (preferredTemplateIndices is not null && preferredTemplateIndices.TryGetValue(groupIndex, out int preferred))
             {
@@ -145,20 +178,26 @@ public static class AutoConversionPlanner
                 }
                 template = candidate;
             }
-            var destinationOptions = targetGroup.Options.Select(destination => new AutomaticOptionPlan(destination.Name,
-                template.Models.Select(m => new AutomaticModelPlan(m.Outfit.Model.RelativePath, m.Body.Model.RelativePath,
-                    destination.Model.RelativePath, Array.Empty<BodyReferencePair>()) { TargetModIndex = destination.TargetModIndex }).ToArray())).ToArray();
+            var styleTemplates = matches.GroupBy(m => m.Style).Select(cohort => cohort.Key == template.Style ? template
+                : cohort.OrderBy(m => m.Models[0].Body.Features == template.Models[0].Body.Features ? 0 : 1)
+                    .ThenBy(m => TemplateRank(m.Models[0].Body.Name, sourceYab)).ThenBy(m => m.Index).First()).ToArray();
+            var destinationOptions = targetGroup.Options.SelectMany(destination => styleTemplates.Select(styleTemplate =>
+                new AutomaticOptionPlan(string.IsNullOrEmpty(styleTemplate.Style) ? destination.Name : $"{destination.Name} / {styleTemplate.Style}",
+                    styleTemplate.Models.Select(m => new AutomaticModelPlan(m.Outfit.Model.RelativePath, m.Body.Model.RelativePath,
+                        destination.Model.RelativePath, Array.Empty<BodyReferencePair>())
+                        { TargetModIndex = destination.TargetModIndex, LocalizeReference = m.Outfit.IsAccessory }).ToArray())
+                { TemplateOptionIndex = styleTemplate.Index })).ToArray();
             int destinationDefault = targetGroup.Options.ToList().FindIndex(o => o == targetGroup.Default);
             if (!targetGroup.HasModelDefault)
                 warnings.Add($"Destination group '{targetGroup.Name}' has no enabled model default. The generated group initially selects '{targetGroup.Default.Name}'.");
             var planned = new AutomaticGroupPlan(groupIndex, name, template.Index, template.Name, groupKey.Slot,
-                targetGroup.Name, Math.Max(0, destinationDefault), destinationOptions)
+                targetGroup.Name, Math.Max(0, destinationDefault) * styleTemplates.Length + Array.FindIndex(styleTemplates, m => m.Style == canonicalTemplate.Style), destinationOptions)
             {
-                ValidTemplateOptionIndices = new[] { canonicalTemplate.Index }.Concat(matches.OrderBy(m => TemplateRank(m.Name, sourceYab))
+                ValidTemplateOptionIndices = new[] { canonicalTemplate.Index }.Concat(matches.OrderBy(m => TemplateRank(m.Models[0].Body.Name, sourceYab))
                     .ThenBy(m => m.Index).Select(m => m.Index)).Distinct().ToArray(),
             };
             drafts.Add(new(planned, groupKey, template));
-            warnings.Add($"'{name}' uses outfit size '{template.Name}' as its conversion template and creates {destinationOptions.Length} destination fits. Original non-size groups are retained.");
+            warnings.Add($"'{name}' uses {string.Join(", ", styleTemplates.Select(m => $"'{m.Name}'"))} as conversion templates and creates {destinationOptions.Length} destination fits. Original non-size groups are retained.");
         }
 
         var defaultData = outfit.GetDefaultDataSnapshot();
@@ -179,7 +218,10 @@ public static class AutoConversionPlanner
             IReadOnlyList<AutomaticModelPlan> Variants(AutomaticModelPlan model)
             {
                 var dimensions = new List<IReadOnlyList<SupplementalChoice>>();
-                foreach (var otherKey in targets.Keys.Where(k => k.Race == draft.Key.Race && k.Slot != draft.Key.Slot))
+                // Accessory inference deliberately accepts only geometry localized
+                // to one body region. Unrelated hand/foot/leg defaults do not fit it.
+                foreach (var otherKey in targets.Keys.Where(k => k.Race == draft.Key.Race && k.Slot != draft.Key.Slot
+                    && !model.LocalizeReference))
                 {
                     if (!sources.TryGetValue(otherKey, out var otherSource)) continue;
                     int neighborIndex = drafts.FindIndex(d => d.Key == otherKey);
@@ -270,14 +312,14 @@ public static class AutoConversionPlanner
         warnings.Add("Destination option names identify the body reference used for fitting. Unsupported YAB/IVCS weight influences are adapted to that body; body textures, underwear, genital meshes and physics are not copied into the outfit.");
         if (finalGroups.SelectMany(g => g.Options).SelectMany(o => o.Models).Any(m => m.RequiredOptions.Count > 0))
             warnings.Add($"Sizes stay independently selectable in Penumbra. {variantCount:N0} coordinated model variants keep garments fitted to the selected neighboring sizes, including skirts inside chest models. Disabled or absent neighboring outfit parts use the body package's default fit.");
-        else
+        else if (finalGroups.SelectMany(g => g.Options).SelectMany(o => o.Models).Any(m => !m.LocalizeReference))
             warnings.Add("Neighboring body regions without outfit size selectors use the destination body's package-default fit.");
-        return new(finalGroups, issues.Distinct().ToArray(), warnings.Distinct().ToArray());
+        return new(finalGroups, issues.Distinct().ToArray(), warnings.Distinct().ToArray()) { PreservedModelPaths = preservedModels.ToArray() };
 
         void PlanDefaultModels(JsonObject data)
         {
             var localIssues = new List<string>();
-            var models = DirectModels(data, inventory, "outfit default data", localIssues);
+            var models = DirectModels(data, inventory, "outfit default data", localIssues, accessoryRegions);
             issues.AddRange(localIssues);
             foreach (var region in models.GroupBy(m => m.Key))
             {
@@ -302,7 +344,8 @@ public static class AutoConversionPlanner
                 var template = new MatchedOption(-1, "Default", region.Select(m => (m, unique[0])).ToArray());
                 string name = $"{RegionName(region.Key.Slot)} size";
                 var options = tg.Options.Select(o => new AutomaticOptionPlan(o.Name, region.Select(m =>
-                    new AutomaticModelPlan(m.Model.RelativePath, unique[0].Model.RelativePath, o.Model.RelativePath, Array.Empty<BodyReferencePair>()) { TargetModIndex = o.TargetModIndex }).ToArray())).ToArray();
+                    new AutomaticModelPlan(m.Model.RelativePath, unique[0].Model.RelativePath, o.Model.RelativePath, Array.Empty<BodyReferencePair>())
+                    { TargetModIndex = o.TargetModIndex, LocalizeReference = m.IsAccessory }).ToArray())).ToArray();
                 drafts.Add(new(new(-1, name, -1, "Default", region.Key.Slot, tg.Name,
                     Math.Max(0, tg.Options.ToList().FindIndex(o => o == tg.Default)), options), region.Key, template));
             }
@@ -448,7 +491,7 @@ public static class AutoConversionPlanner
 
     private static Features ParseFeatures(string name, bool yab)
     {
-        string value = Normalized(name);
+        string value = Normalized(BodyFitLabels.NormalizeBodyOptionLabel(name));
         if (yab)
         {
             value = Regex.Replace(value, @"\b(?:w c|wc|watermelon crushers)\b", "watermeloncrushers");
@@ -497,21 +540,88 @@ public static class AutoConversionPlanner
         return new() { ["Files"] = files, ["FileSwaps"] = option["FileSwaps"]?.DeepClone() ?? new JsonObject(), ["Manipulations"] = manipulations };
     }
 
-    private static List<OutfitModel> DirectModels(JsonObject container, Dictionary<string, ModModelFile> inventory, string context, List<string> issues)
+    private static List<OutfitModel> DirectModels(JsonObject container, Dictionary<string, ModModelFile> inventory, string context, List<string> issues,
+        IReadOnlyDictionary<string, string>? accessoryRegions)
     {
         var list = new List<OutfitModel>();
         if (container.Any(p => p.Key is not ("Files" or "FileSwaps" or "Manipulations") && HasModels(p.Value)))
             issues.Add($"{context} contains conditional or nested model mappings. Automatic sizing requires direct model options.");
         foreach (var (gamePath, relative) in ModelGamePaths(container))
         {
-            if (!TryRegion(gamePath, out var key)) { issues.Add($"Model '{gamePath}' in {context} is not a supported equipment body region."); continue; }
+            if (!TryRegion(gamePath, out var key))
+            {
+                if (!TryAccessoryRace(gamePath, out var race))
+                { issues.Add($"Model '{gamePath}' in {context} is not a supported equipment body region or accessory slot."); continue; }
+                if (accessoryRegions is null || !accessoryRegions.TryGetValue(AccessoryKey(race, relative), out var slot)
+                    || slot is not ("top" or "dwn" or "glv" or "sho"))
+                { issues.Add($"Accessory '{relative}' in {context} cannot be assigned to one source body region from its geometry. Use advanced body references for ambiguous accessories."); continue; }
+                key = new(race, slot);
+            }
             if (!inventory.TryGetValue(PathKey(relative), out var model)) { issues.Add($"Model '{relative}' in {context} is missing from the included model inventory."); continue; }
-            list.Add(new(model, key));
+            list.Add(new(model, key) { IsAccessory = TryAccessoryRace(gamePath, out _) });
         }
         if (container["FileSwaps"] is JsonObject swaps && swaps.Any(p => p.Key.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase)))
             issues.Add($"{context} uses model file swaps; automatic sizing requires included models.");
         return list.DistinctBy(m => (PathKey(m.Model.RelativePath), m.Key)).ToList();
     }
+
+    // A ring slot can hold a chest ornament. Equip slots identify the race, while
+    // the actual geometry establishes which source body surface should fit it.
+    internal static IReadOnlyDictionary<string, string> ResolveAccessoryRegions(PenumbraMod source, PenumbraMod outfit, CancellationToken ct)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        var bodyGroups = DiscoverBodies(source, "Source", []);
+        var inventory = outfit.GetModelFiles().ToDictionary(m => PathKey(m.RelativePath), StringComparer.Ordinal);
+        var references = new Dictionary<string, Dictionary<string, byte[]>>(StringComparer.Ordinal);
+        var options = outfit.GetGroupSnapshots().SelectMany(g => Objects(g, "Options"))
+            .Where(o => BodyFitLabels.ParseOutfitLabel(Text(o, "Name"), source.Name) is not { MatchesSource: false })
+            .Append(outfit.GetDefaultDataSnapshot());
+        var inspected = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var mapping in options.SelectMany(ModelGamePaths))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!TryAccessoryRace(mapping.Key, out var race)) continue;
+            string key = AccessoryKey(race, mapping.Value);
+            if (!inspected.Add(key) || !inventory.TryGetValue(PathKey(mapping.Value), out var model)) continue;
+            if (!references.TryGetValue(race, out var bodies))
+            {
+                bodies = bodyGroups.Where(p => p.Key.Race == race).ToDictionary(p => p.Key.Slot,
+                    p => Read(p.Value.Default.Model.FullPath), StringComparer.Ordinal);
+                references.Add(race, bodies);
+            }
+            if (bodies.Count == 0) continue;
+            try
+            {
+                var region = AccessoryRegionResolver.Resolve(Read(model.FullPath), bodies, ct);
+                if (region is not null) result.Add(key, region);
+            }
+            catch (Exception e) when (e is ModelConversionException or InvalidDataException)
+            {
+                // Leave this model unresolved: the planner reports its precise
+                // option rather than silently assigning an unreadable accessory.
+            }
+        }
+        return result;
+
+        static byte[] Read(string path)
+        {
+            if (new FileInfo(path).Length > 256L * 1024 * 1024) throw new InvalidDataException("Model exceeds 256 MiB.");
+            return File.ReadAllBytes(path);
+        }
+    }
+
+    internal static string AccessoryKey(string race, string relative) => race + ":" + PathKey(relative);
+    private static bool TryAccessoryRace(string path, out string race)
+    {
+        var match = Regex.Match(path.Replace('\\', '/'), @"(?:^|/)c(?<race>\d{4})a\d{4}_(?:ear|nek|wrs|ril|rir)\.mdl$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        race = match.Groups["race"].Value;
+        return match.Success;
+    }
+
+    private static bool HasModelSwapsOrNestedMappings(JsonObject option)
+        => option["FileSwaps"] is JsonObject swaps && swaps.Any(p => p.Key.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase))
+            || option.Any(p => p.Key is not ("Files" or "FileSwaps" or "Manipulations") && HasModels(p.Value));
 
     private static bool TryRegion(string gamePath, out RegionKey key)
     {

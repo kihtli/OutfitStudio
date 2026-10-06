@@ -34,7 +34,8 @@ internal static class AutomaticConversionService
         progress?.Report(new("Sizes", 0, 1, "Matching outfit sizes to the source and destination bodies"));
         preferredTemplates ??= [];
         triedTemplates ??= [];
-        var plan = AutoConversionPlanner.Plan(source, targets, outfit, preferredTemplates);
+        var accessoryRegions = AutoConversionPlanner.ResolveAccessoryRegions(source, outfit, ct);
+        var plan = AutoConversionPlanner.Plan(source, targets, outfit, preferredTemplates, accessoryRegions);
         var replaced = plan.Groups.Where(g => g.SourceGroupIndex >= 0).Select(g => g.SourceGroupName).ToHashSet(StringComparer.Ordinal);
         var summary = new AutomaticPlanSummary
         {
@@ -71,7 +72,8 @@ internal static class AutomaticConversionService
         var targetFiles = targets.Select(mod => mod.GetModelFiles().ToDictionary(m => Normalize(m.RelativePath), StringComparer.OrdinalIgnoreCase)).ToArray();
         var outfitFiles = outfit.GetModelFiles().ToDictionary(m => Normalize(m.RelativePath), StringComparer.OrdinalIgnoreCase);
         var settings = new ConversionSettings { Strength = request.Strength, Clearance = request.Clearance, MaximumDistance = request.MaxDistance };
-        var prepared = new Dictionary<(string Source, int TargetModIndex, string Target), PreparedConversion>();
+        var prepared = new Dictionary<(string Source, int TargetModIndex, string Target, bool Localized), PreparedConversion>();
+        var accessoryInputs = new Dictionary<string, byte[][]>(StringComparer.OrdinalIgnoreCase);
         // Individual body references are reused, but the Cartesian size product must
         // not retain hundreds of combined triangle and bone-weight spatial indices.
         var checkedCombinations = new HashSet<string>(StringComparer.Ordinal);
@@ -89,7 +91,7 @@ internal static class AutomaticConversionService
                 if (inspected.Add(job.File.SourceRelativePath))
                     _ = MdlConverter.Inspect(await ReadModel(outfitFiles[Normalize(job.File.SourceRelativePath)].FullPath, ct));
                 var pairs = ReferencePairs(job.Mapping);
-                var key = JsonSerializer.Serialize(pairs, WorkerProtocol.Json);
+                var key = JsonSerializer.Serialize(new { Pairs = pairs, job.Mapping.LocalizeReference }, WorkerProtocol.Json);
                 if (!checkedCombinations.Contains(key))
                 {
                     var parts = new List<PreparedConversion>();
@@ -97,12 +99,24 @@ internal static class AutomaticConversionService
                     {
                         if (pair.TargetModIndex < 0 || pair.TargetModIndex >= targets.Count)
                             throw new InvalidDataException("A planned body reference names an unknown destination mod.");
-                        var pairKey = (Source: Normalize(pair.SourceModelPath), pair.TargetModIndex, Target: Normalize(pair.TargetModelPath));
+                        var pairKey = (Source: Normalize(pair.SourceModelPath), pair.TargetModIndex, Target: Normalize(pair.TargetModelPath), Localized: job.Mapping.LocalizeReference);
                         if (!prepared.TryGetValue(pairKey, out var conversion))
                         {
                             var sourceBytes = await ReadModel(sourceFiles[pairKey.Source].FullPath, ct);
                             var targetBytes = await ReadModel(targetFiles[pair.TargetModIndex][pairKey.Target].FullPath, ct);
-                            conversion = MdlConverter.Prepare(sourceBytes, targetBytes, settings, ct);
+                            if (pairKey.Localized)
+                            {
+                                if (!accessoryInputs.TryGetValue(pairKey.Source, out var inputs))
+                                {
+                                    var paths = jobs.Where(j => j.Mapping.LocalizeReference && string.Equals(Normalize(j.Mapping.SourceModelPath), pairKey.Source, StringComparison.OrdinalIgnoreCase))
+                                        .Select(j => Normalize(j.File.SourceRelativePath)).Distinct(StringComparer.OrdinalIgnoreCase);
+                                    var loaded = new List<byte[]>();
+                                    foreach (var path in paths) loaded.Add(await ReadModel(outfitFiles[path].FullPath, ct));
+                                    accessoryInputs[pairKey.Source] = inputs = loaded.ToArray();
+                                }
+                                conversion = MdlConverter.PrepareForAccessories(sourceBytes, targetBytes, inputs, settings, ct);
+                            }
+                            else conversion = MdlConverter.Prepare(sourceBytes, targetBytes, settings, ct);
                             prepared.Add(pairKey, conversion);
                             warnings.AddRange(conversion.Warnings);
                             references.Add(new { SourceModel = pair.SourceModelPath, TargetModel = pair.TargetModelPath,
@@ -162,12 +176,12 @@ internal static class AutomaticConversionService
                 progress?.Report(new("Create sizes", models, jobs.Count, job.Label));
                 var original = await ReadModel(outfitFiles[Normalize(file.SourceRelativePath)].FullPath, cancellation);
                 var pairs = ReferencePairs(job.Mapping);
-                var combinationKey = JsonSerializer.Serialize(pairs, WorkerProtocol.Json);
+                var combinationKey = JsonSerializer.Serialize(new { Pairs = pairs, job.Mapping.LocalizeReference }, WorkerProtocol.Json);
                 if (lastCombinationKey != combinationKey)
                 {
                     lastCombination = null;
                     lastCombination = MdlConverter.Combine(pairs.Select(pair => prepared[
-                        (Normalize(pair.SourceModelPath), pair.TargetModIndex, Normalize(pair.TargetModelPath))]));
+                        (Normalize(pair.SourceModelPath), pair.TargetModIndex, Normalize(pair.TargetModelPath), job.Mapping.LocalizeReference)]));
                     lastCombinationKey = combinationKey;
                 }
                 var converted = lastCombination!.Convert(original, cancellation);
@@ -175,7 +189,7 @@ internal static class AutomaticConversionService
                 await File.WriteAllBytesAsync(destination, converted.ModelData, cancellation);
                 models++; vertices += converted.ConvertedVertices;
                 warnings.AddRange(converted.Warnings.Select(w => $"{job.Label}: {w}"));
-                modelReports.Add(new { SourceModel = file.SourceRelativePath, OutputModel = file.OutputRelativePath,
+                modelReports.Add(new { SourceModel = file.SourceRelativePath, OutputModel = file.OutputRelativePath, job.Mapping.LocalizeReference,
                     job.Mapping.SourceModelPath, TargetModel = job.Mapping.TargetModelPath, job.Mapping.TargetModIndex,
                     TargetModName = targets[job.Mapping.TargetModIndex].Name, TargetModPath = requestedTargetPaths[job.Mapping.TargetModIndex],
                     AdditionalBodyReferences = job.Mapping.AdditionalBodyReferences.Select(pair => new
@@ -238,13 +252,15 @@ internal static class AutomaticConversionService
             }
             firstGeneratedOptions.Add(options.Count);
             originalOptionIndices.Add(originalIndices);
-            var template = group.TemplateOptionIndex >= 0 ? (JsonObject)originalOptions[group.TemplateOptionIndex]! : originalDefaults;
             foreach (var destination in group.Options)
             {
+                int templateIndex = destination.TemplateOptionIndex ?? group.TemplateOptionIndex;
+                var template = templateIndex >= 0 ? (JsonObject)originalOptions[templateIndex]! : originalDefaults;
+                string templateName = templateIndex >= 0 ? template["Name"]?.GetValue<string>() ?? group.TemplateOptionName : group.TemplateOptionName;
                 var option = group.SourceGroupIndex >= 0 ? (JsonObject)template.DeepClone()
                     : new JsonObject { ["Files"] = template["Files"]?.DeepClone() ?? new JsonObject() };
                 option["Name"] = destination.Name;
-                option["Description"] = $"Fitted to {destination.Name} from {group.TemplateOptionName}.";
+                option["Description"] = $"Fitted to {destination.Name} from {templateName}.";
                 option["Id"] = Guid.NewGuid().ToString();
                 option.Remove("Identifier");
                 options.Add(option);
@@ -285,7 +301,7 @@ internal static class AutomaticConversionService
                     if (keys.Length == 0) throw new InvalidDataException($"No outfit model is associated with {group.DestinationGroupName}: {destination.Name}.");
                     // None fallbacks and aliases can request exactly the same physical
                     // conversion under different conditions. Generate that model once.
-                    var jobKey = JsonSerializer.Serialize(new { Outfit = Normalize(model.OutfitModelPath).ToLowerInvariant(),
+                    var jobKey = JsonSerializer.Serialize(new { Outfit = Normalize(model.OutfitModelPath).ToLowerInvariant(), model.LocalizeReference,
                         References = ReferencePairs(model).Select(pair => new { Source = Normalize(pair.SourceModelPath).ToLowerInvariant(),
                             pair.TargetModIndex, Target = Normalize(pair.TargetModelPath).ToLowerInvariant() }) }, WorkerProtocol.Json);
                     if (!jobsByReferences.TryGetValue(jobKey, out var job))
@@ -356,7 +372,8 @@ internal static class AutomaticConversionService
                 ["Options"] = new JsonArray(option),
             }));
         }
-        return (new(replacements, jobs.Select(j => j.File).ToArray(), defaults), jobs);
+        return (new ModRegenerationPlan(replacements, jobs.Select(j => j.File).ToArray(), defaults)
+            { PreservedModelPaths = plan.PreservedModelPaths }, jobs);
 
         static void EnsureId(JsonObject setting)
         {

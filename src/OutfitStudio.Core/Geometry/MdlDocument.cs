@@ -225,7 +225,10 @@ internal sealed partial class MdlDocument
 
         void AssignRange(int start, int count, int lod)
         {
-            if (start + count > meshCount || (count != 0 && lod >= lodCount)) throw Error("Invalid LOD mesh range.");
+            // Exporters can leave stale start indices on empty optional ranges and
+            // unused LODs. No mesh is addressed until the range contains an entry.
+            if (count == 0) return;
+            if (start + count > meshCount || lod >= lodCount) throw Error("Invalid LOD mesh range.");
             for (int m = start; m < start + count; m++)
             {
                 if (meshLods[m] != -1 && meshLods[m] != lod) throw Error("A mesh is assigned to multiple LODs.");

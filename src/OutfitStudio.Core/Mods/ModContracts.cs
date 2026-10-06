@@ -26,7 +26,11 @@ public sealed record ModGroupReplacement(string? SourceGroupName, JsonObject Gro
 public sealed record ModRegenerationPlan(
     IReadOnlyList<ModGroupReplacement> GroupReplacements,
     IReadOnlyList<ModGeneratedModel> Models,
-    JsonObject? DefaultData = null);
+    JsonObject? DefaultData = null)
+{
+    /// <summary>Referenced original models explicitly retained with their original game-path mappings.</summary>
+    public IReadOnlyList<string> PreservedModelPaths { get; init; } = [];
+}
 
 /// <summary>Limits apply before extraction or cloning; no archive content is executed.</summary>
 public sealed record ModReadLimits(

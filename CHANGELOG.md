@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.10 — Accessory fitting (testing prerelease)
+
+- Support accessories with explicit body, size and style labels, retaining each style in the destination choices.
+- Infer an accessory's fitted body region from its geometry instead of its equipment slot.
+- Preserve fixed support models for races outside the selected source body.
+- Match Bibo nude and perky references explicitly and normalize size labels such as X-Large.
+- Fit localized accessories using their original nearest body faces and adjacent surface, retaining strict correspondence checks on that surface.
+- Preserve rigid accessory parts and use authored bone weights to keep mechanical assemblies together and place connecting links.
+- Align uniformly shifted UV tiles without changing stored texture coordinates or increasing the correspondence tolerance.
+- Accept unused offsets on empty model LOD ranges while continuing to validate nonempty ranges.
+
 ## 0.1.9 — Initial testing prerelease
 
 - Convert installed Penumbra outfits using source and destination body references.

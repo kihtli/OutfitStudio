@@ -377,6 +377,17 @@ public sealed class AutomaticPlannerTests
     }
 
     [Fact]
+    public void DottedYabLegAbbreviationsRemainValidWithBodyLabelNormalization()
+    {
+        using var fixture = new Fixture();
+        using var source = fixture.Mod("source", "YAB+", Group("Legs", "dwn", 0, "Skull Crushers - A", "Small - Skull Crushers - A"));
+        using var target = fixture.Mod("target", "Destination", Group("Legs", "dwn", 0, "Medium"));
+        using var outfit = fixture.Mod("outfit", "Outfit", Group("Leg size", "dwn", 0, "S.C", "S.C - Small Butt"));
+        var plan = AutoConversionPlanner.Plan(source, target, outfit);
+        Assert.True(plan.CanConvert, string.Join("; ", plan.Issues));
+    }
+
+    [Fact]
     public void KnownYabSmallButtShapeIsARecognizedSizeDifference()
     {
         using var fixture = new Fixture();

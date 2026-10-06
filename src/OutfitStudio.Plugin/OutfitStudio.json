@@ -2,7 +2,7 @@
   "Author": "kihtli",
   "Name": "Outfit Studio",
   "InternalName": "OutfitStudio",
-  "AssemblyVersion": "0.1.9.0",
+  "AssemblyVersion": "0.1.10.0",
   "RepoUrl": "https://github.com/kihtli/OutfitStudio",
   "Punchline": "Testing prerelease: refit Penumbra outfits between compatible body meshes.",
   "Description": "Choose a source body, an outfit and one or more destination bodies to create a new mod with their body and size choices. Automatically matches labelled source sizes, keeps other outfit styles and previews the combined options. Advanced manual references remain available for one destination body. Processing runs in a separate worker. Open with /outfitstudio. Experimental: review converted outfits in game.",

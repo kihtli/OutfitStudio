@@ -8,6 +8,8 @@ public sealed record AutomaticConversionPlan(
     IReadOnlyList<string> Warnings)
 {
     public bool CanConvert => Groups.Count > 0 && Issues.Count == 0;
+    /// <summary>Fixed accessory support models outside the converted body race.</summary>
+    public IReadOnlyList<string> PreservedModelPaths { get; init; } = [];
 }
 
 /// <param name="SourceGroupIndex">Original outfit group index; -1 denotes a default-data model.</param>
@@ -27,7 +29,11 @@ public sealed record AutomaticGroupPlan(
     public int[] ValidTemplateOptionIndices { get; init; } = [];
 }
 
-public sealed record AutomaticOptionPlan(string Name, IReadOnlyList<AutomaticModelPlan> Models);
+public sealed record AutomaticOptionPlan(string Name, IReadOnlyList<AutomaticModelPlan> Models)
+{
+    /// <summary>Per-style source payload; null uses the containing group's template.</summary>
+    public int? TemplateOptionIndex { get; init; }
+}
 
 /// <summary>A neighboring size selector required by a particular generated model.</summary>
 /// <param name="GroupIndex">Zero-based index in AutomaticConversionPlan.Groups.</param>
@@ -46,6 +52,9 @@ public sealed record AutomaticModelPlan(
 {
     /// <summary>Owner of TargetModelPath in the request's ordered destination list.</summary>
     public int TargetModIndex { get; init; }
+
+    /// <summary>Only source faces used by a localized accessory need body correspondence.</summary>
+    public bool LocalizeReference { get; init; }
 
     /// <summary>Neighbor selections required in addition to the containing group's option.</summary>
     public IReadOnlyList<AutomaticOptionSelection> RequiredOptions { get; init; } = [];

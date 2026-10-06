@@ -16,7 +16,8 @@ public static class MdlConverter
             throw MdlDocument.Error("Combined references map the same source triangle to conflicting target positions.");
         return new PreparedConversion(new TriangleIndex(triangles), items[0].Settings,
             string.Join(" + ", items.Select(c => c.Method).Distinct()), items.SelectMany(c => c.Warnings).Distinct().ToArray(),
-            items.SelectMany(c => c.BodyMaterials), BoneWeightTransfer.Combine(items.Select(c => c.WeightTransfer)));
+            items.SelectMany(c => c.BodyMaterials), BoneWeightTransfer.Combine(items.Select(c => c.WeightTransfer)),
+            items.All(c => c.PreserveRigidParts));
     }
     public static ModelInspection Inspect(byte[] model) => MdlDocument.Parse(model).Inspection;
 
@@ -26,6 +27,14 @@ public static class MdlConverter
 
     public static PreparedConversion Prepare(byte[] sourceBody, byte[] targetBody, ConversionSettings settings,
         CancellationToken cancellationToken = default)
+        => PrepareCore(sourceBody, targetBody, settings, null, cancellationToken);
+
+    internal static PreparedConversion PrepareForAccessories(byte[] sourceBody, byte[] targetBody,
+        IReadOnlyList<byte[]> accessories, ConversionSettings settings, CancellationToken cancellationToken = default)
+        => PrepareCore(sourceBody, targetBody, settings, accessories, cancellationToken);
+
+    private static PreparedConversion PrepareCore(byte[] sourceBody, byte[] targetBody, ConversionSettings settings,
+        IReadOnlyList<byte[]>? accessories, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(settings);
         if (!float.IsFinite(settings.Strength) || settings.Strength is < 0 or > 1)
@@ -43,6 +52,10 @@ public static class MdlConverter
         int ignored = source.Meshes.Count(m => m.Lod == 0 && m.Indices.Length > 0) - sourceMeshes.Length
             + target.Meshes.Count(m => m.Lod == 0 && m.Indices.Length > 0) - targetMeshes.Length;
         if (ignored != 0) warnings.Add($"Excluded {ignored} reference meshes whose material names identify piercings, pubes, underwear or nails.");
+        var scopedIndices = accessories is null ? null : AccessoryReferenceScope.Select(sourceMeshes,
+            accessories.Select(MdlDocument.Parse), settings.MaximumDistance, cancellationToken);
+        if (scopedIndices is not null)
+            warnings.Add("Localized accessory fitting checks the original nearest body faces and their adjacent surface; unrelated body regions are excluded from correspondence.");
 
         var triangles = new List<SurfaceTriangle>();
         var bodyMaterials = new HashSet<string>(StringComparer.Ordinal);
@@ -50,6 +63,8 @@ public static class MdlConverter
         foreach (var sm in sourceMeshes)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var indices = scopedIndices is null ? sm.Indices : scopedIndices[sm.Index];
+            if (indices.Length == 0) continue;
             string sourceMaterial = MaterialKey(source.Materials[sm.Material]);
             var candidates = targetMeshes.Where(m => MaterialKey(target.Materials[m.Material]) == sourceMaterial).ToArray();
             if (candidates.Length == 0 && sourceMeshes.Length == 1 && targetMeshes.Length == 1)
@@ -57,7 +72,11 @@ public static class MdlConverter
                 candidates = targetMeshes;
                 warnings.Add("Reference material names differ; using their single surface mesh. Confirm these references represent the same body region.");
             }
-            if (candidates.Length == 0) { omitted++; continue; }
+            if (candidates.Length == 0)
+            {
+                if (scopedIndices is not null) throw MdlDocument.Error("An accessory-bound source surface has no matching target material.");
+                omitted++; continue;
+            }
             bodyMaterials.Add(sourceMaterial);
             foreach (var candidate in candidates) bodyMaterials.Add(MaterialKey(target.Materials[candidate.Material]));
             var matching = candidates.Where(m => SameTopology(sm, m)).ToArray();
@@ -71,16 +90,20 @@ public static class MdlConverter
             {
                 if (!settings.AllowUvCorrespondence) throw MdlDocument.Error("Body vertex order/topology differs. Enable UV correspondence or select matching body variants.");
                 if (sm.Uvs is null || candidates.Any(m => m.Uvs is null)) throw MdlDocument.Error("Different body topology requires primary UV coordinates on both references.");
-                destination = MapUv(sm, target, candidates, cancellationToken, ref extrapolated, ref continuityResolved, ref hiddenLayers, ref projectedLayers);
+                destination = MapUv(sm, indices, target, candidates, warnings, cancellationToken, ref extrapolated, ref continuityResolved, ref hiddenLayers, ref projectedLayers);
                 uvMapped++;
             }
-            for (int i = 0; i < sm.Indices.Length; i += 3)
+            for (int i = 0; i < indices.Length; i += 3)
             {
-                int a = sm.Indices[i], b = sm.Indices[i + 1], c = sm.Indices[i + 2];
+                int a = indices[i], b = indices[i + 1], c = indices[i + 2];
                 var sa = sm.Positions[a]; var sb = sm.Positions[b]; var sc = sm.Positions[c];
                 var ta = destination[a]; var tb = destination[b]; var tc = destination[c];
                 if (Vector3.Cross(sb - sa, sc - sa).LengthSquared() < 1e-16f) { degenerate++; continue; }
-                if (Vector3.Cross(tb - ta, tc - ta).LengthSquared() < 1e-18f) { degenerate++; continue; }
+                if (Vector3.Cross(tb - ta, tc - ta).LengthSquared() < 1e-18f)
+                {
+                    if (scopedIndices is not null) throw MdlDocument.Error("An accessory-bound source face collapses on the target body; a custom correspondence is required.");
+                    degenerate++; continue;
+                }
                 triangles.Add(new(sa, sb, sc, ta, tb, tc));
             }
         }
@@ -97,7 +120,7 @@ public static class MdlConverter
         warnings.Add("Materials and topology are retained. Source-only body physics weights are adapted to the destination body when needed; garment-specific animation weights remain. Skin textures are not transferred.");
         var method = uvMapped > 0 ? topologyMapped > 0 ? "Topology and UV surface correspondence" : "UV surface correspondence" : "Matching topology";
         return new PreparedConversion(new TriangleIndex(triangles), settings, method, warnings, bodyMaterials,
-            BoneWeightTransfer.Create(target, targetMeshes, cancellationToken, SourceBodyBones()));
+            BoneWeightTransfer.Create(target, targetMeshes, cancellationToken, SourceBodyBones()), accessories is not null);
 
         IEnumerable<string> SourceBodyBones()
         {
@@ -125,18 +148,22 @@ public static class MdlConverter
         return material.Contains("piercing") || material.Contains("pube") || material.Contains("undies") || material.Contains("underwear") || material.Contains("nail");
     }
 
-    private static Vector3[] MapUv(MdlDocument.Mesh source, MdlDocument targetDocument, MdlDocument.Mesh[] targets, CancellationToken ct, ref int extrapolated, ref int continuityResolved, ref int hiddenLayers, ref int projectedLayers)
+    private static Vector3[] MapUv(MdlDocument.Mesh source, ushort[] indices, MdlDocument targetDocument, MdlDocument.Mesh[] targets, List<string> warnings, CancellationToken ct, ref int extrapolated, ref int continuityResolved, ref int hiddenLayers, ref int projectedLayers)
     {
         var visibleSurface = new BodySurfaceVisibility(targetDocument, targets);
         var index = visibleSurface.UvIndex;
+        var vertices = indices.Select(vertex => (int)vertex).Distinct().ToArray();
+        var uvOffset = UvTileAlignment.Select(source.Uvs!, vertices, index, ct);
+        if (uvOffset != Vector2.Zero)
+            warnings.Add(FormattableString.Invariant($"Aligned source body UV correspondence by a uniform tile offset ({uvOffset.X}, {uvOffset.Y}); stored mesh UV coordinates were retained."));
         var result = new Vector3[source.VertexCount];
         var resolved = new bool[source.VertexCount];
         var unresolved = new Dictionary<int, Vector3[]>();
         var choices = new Dictionary<int, Vector3[]>();
-        foreach (int vertex in source.Indices.Distinct())
+        foreach (int vertex in vertices)
         {
             if ((vertex & 255) == 0) ct.ThrowIfCancellationRequested();
-            var uv = new Vector3(source.Uvs![vertex], 0);
+            var uv = new Vector3(source.Uvs![vertex] + uvOffset, 0);
             var nearest = index.Nearest(uv, 0.015f * 0.015f)
                 ?? throw MdlDocument.Error($"Source body vertex {vertex} has no target UV correspondence within 0.015 atlas units. These variants need a custom body mapping.");
             if (nearest.DistanceSquared > 1e-10f) extrapolated++;
@@ -159,10 +186,10 @@ public static class MdlConverter
         // never to an arbitrary atlas triangle or an ordering-dependent default.
         var neighbors = new HashSet<int>[source.VertexCount];
         for (int i = 0; i < neighbors.Length; i++) neighbors[i] = [];
-        for (int i = 0; i < source.Indices.Length; i += 3)
+        for (int i = 0; i < indices.Length; i += 3)
             for (int corner = 0; corner < 3; corner++)
             {
-                int a = source.Indices[i + corner], b = source.Indices[i + (corner + 1) % 3];
+                int a = indices[i + corner], b = indices[i + (corner + 1) % 3];
                 neighbors[a].Add(b); neighbors[b].Add(a);
             }
         for (int iteration = 0; iteration < 8 && unresolved.Count > 0; iteration++)
@@ -218,18 +245,21 @@ public sealed class PreparedConversion
     private GarmentDeformationField? garmentField;
     internal IEnumerable<string> BodyMaterials => bodyMaterials;
     internal BoneWeightTransfer WeightTransfer { get; }
+    internal bool PreserveRigidParts { get; }
     public string Method { get; }
     public IReadOnlyList<string> Warnings { get; }
     internal ConversionSettings Settings => settings;
     internal IEnumerable<SurfaceTriangle> Triangles => surface.Triangles;
 
-    internal PreparedConversion(TriangleIndex surface, ConversionSettings settings, string method, IReadOnlyList<string> warnings, IEnumerable<string>? bodyMaterials = null, BoneWeightTransfer? weightTransfer = null)
+    internal PreparedConversion(TriangleIndex surface, ConversionSettings settings, string method, IReadOnlyList<string> warnings, IEnumerable<string>? bodyMaterials = null, BoneWeightTransfer? weightTransfer = null,
+        bool preserveRigidParts = false)
     {
         this.surface = surface; this.settings = settings; Method = method; Warnings = warnings.ToArray();
         identitySurface = surface.Triangles.All(triangle => triangle.A == triangle.TargetA
             && triangle.B == triangle.TargetB && triangle.C == triangle.TargetC);
         this.bodyMaterials = new HashSet<string>(bodyMaterials ?? [], StringComparer.Ordinal);
         WeightTransfer = weightTransfer ?? BoneWeightTransfer.Combine([]);
+        PreserveRigidParts = preserveRigidParts;
     }
 
     public ConversionResult Convert(byte[] outfit, CancellationToken cancellationToken = default)
@@ -364,13 +394,18 @@ public sealed class PreparedConversion
         if (unbound == model.Meshes.Sum(m => m.VertexCount))
             throw MdlDocument.Error("No outfit vertices are within the maximum binding distance of the selected body reference.");
         var clearanceResult = GarmentClearance.Refine(model, output, bodyMaterials, settings.Clearance * settings.Strength, cancellationToken, boundVertices);
+        var rigidResult = PreserveRigidParts && changed > 0
+            ? RigidAccessoryParts.Apply(model, output, bodyMaterials, cancellationToken) : null;
+        if (rigidResult is { Assemblies: > 0 })
+            warnings.Add($"Preserved {rigidResult.Assemblies} rigid accessory assemblies from {rigidResult.Components} connected parts; {rigidResult.BlendedParts} connecting parts follow their authored attachment blends.");
         int transferredWeights = WeightTransfer.Apply(model, output, bodyMaterials, settings.MaximumDistance, boundVertices, cancellationToken, warnings);
         if (transferredWeights > 0)
             warnings.Add($"Adapted destination body weights on {transferredWeights} vertices to remove source-only body physics bones; embedded skin follows the destination and garment-specific animation influences are preserved.");
-        if (clearanceResult.AdjustedVertices > 0 || clearanceResult.UnresolvedSamples > 0 || transferredWeights > 0)
+        if (clearanceResult.AdjustedVertices > 0 || clearanceResult.UnresolvedSamples > 0 || transferredWeights > 0 || rigidResult is not null)
         {
             if (clearanceResult.AdjustedVertices > 0 || clearanceResult.UnresolvedSamples > 0) warnings.Add($"Garment surface clearance adjusted {clearanceResult.AdjustedVertices} vertices by at most {clearanceResult.MaximumAdjustment:G5} model units across {clearanceResult.Samples} originally covered skin samples; {clearanceResult.UnresolvedSamples} samples remain below the requested clearance. This bounded rest-pose check does not cover animation or unsampled surface intersections.");
             changed = 0; unchanged = 0;
+            min = new(float.PositiveInfinity); max = new(float.NegativeInfinity); radius = 0; greatestDisplacement = 0;
             foreach (var mesh in model.Meshes)
                 for (int i = 0; i < mesh.VertexCount; i++)
                 {
