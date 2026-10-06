@@ -2,14 +2,14 @@
 
 ## Accessory fitting testing prerelease — 0.1.10
 
-The Release suite passes **377 tests**, with no skips on Linux. New synthetic fixtures cover accessory body-region detection, explicit body-family and style matching, nude/perky references, fixed support models, local surface correspondence, uniform UV-tile shifts, empty LOD ranges, rigid assemblies, weighted chain placement and mixed garment/accessory options. The earlier garment, filesystem and worker tests remain included.
+The Release suite passes **377 tests**, with no skips on Linux. New synthetic fixtures cover accessory body-region detection, explicit body-family and style matching, body-shape and coverage variants, fixed support models, local surface correspondence, uniform UV-tile shifts, empty LOD ranges, rigid assemblies, weighted chain placement and mixed garment/accessory options. The earlier garment, filesystem and worker tests remain included.
 
-Private offline checks used **C.K. - Nipple Clamps v1.3, Bibo+ → YAB+**:
+Private offline checks used a multi-style accessory with **Bibo+ → YAB+** references:
 
-- All 12 destination chest options retain both **Clamps** and **Clamps + Chain**, producing 24 converted models in one single-choice group. Both ring-slot aliases remain available.
+- All 12 destination body options retain both accessory styles, producing 24 converted models in one single-choice group. Both ring-slot aliases remain available.
 - Four fixed support models and 14 supporting assets remain unchanged. An independent audit using unmodified Penumbra.GameData parsing accepts all 28 models and verifies topology, materials, bone names and model metadata.
 - All converted mechanical parts preserve their original shape within floating-point precision. The largest edge-length change is below 0.00000023 model units. Across all 12 chain variants, the largest neighboring-link gap remains within 0.00000003 model units of the original.
-- Offline Small and Large renders show intact clamp assemblies and continuous chains. This does not verify animation, physics or the in-game appearance.
+- Offline Small and Large renders show intact rigid assemblies and continuous chains. This does not verify animation, physics or the in-game appearance.
 - The self-contained Windows worker converts all 24 models under Wine through a symlinked input library. Plans, normalized option metadata and reference hashes match Linux. Sixteen models are byte-identical; the other eight differ only in floating-point positions or normals, with maximum position deviation below 0.00000013 model units.
 - All 12 models in the existing Limerence regression reproduce the 0.1.9 reference output byte-for-byte. The complete 0.1.9 private fixture matrix below was not rerun for this update.
 

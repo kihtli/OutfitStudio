@@ -5,7 +5,7 @@
 - Support accessories with explicit body, size and style labels, retaining each style in the destination choices.
 - Infer an accessory's fitted body region from its geometry instead of its equipment slot.
 - Preserve fixed support models for races outside the selected source body.
-- Match Bibo nude and perky references explicitly and normalize size labels such as X-Large.
+- Match Bibo body-shape and coverage variants explicitly and normalize size labels such as X-Large.
 - Fit localized accessories using their original nearest body faces and adjacent surface, retaining strict correspondence checks on that surface.
 - Preserve rigid accessory parts and use authored bone weights to keep mechanical assemblies together and place connecting links.
 - Align uniformly shifted UV tiles without changing stored texture coordinates or increasing the correspondence tolerance.
